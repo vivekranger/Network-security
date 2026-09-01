@@ -130,7 +130,7 @@ void handle_socket_input(fd_set *read_fds, unordered_set<Client *> &clients) {
           cout << "Registered: " << username << endl;
           send_message(client->fd, "WELCOME|" + username + "\n");
         }
-      } else if (message == "LIST") {
+      } else if (message == "WHO") {
         if (client->username.empty()) {
           // ask user to register
           send_message(client->fd, "ERROR|Not registered...\n");

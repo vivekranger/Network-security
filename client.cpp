@@ -50,10 +50,10 @@ bool handle_kb_input(int client_fd, string &current_user,
     // quit the chat app
     send_message(client_fd, "QUIT\n");
     return 0;
-  } else if (input == "/list") {
+  } else if (input == "/who") {
     // /who
     // know the username of active user
-    send_message(client_fd, "LIST\n");
+    send_message(client_fd, "WHO\n");
   } else if (input.find("/chat ", 0) == 0) {
     // /chat username
     // to fix a recipient user, so all following messages will go to that user
@@ -74,7 +74,7 @@ bool handle_kb_input(int client_fd, string &current_user,
     cout << "Now chatting with `" << recipient_user << "`" << endl;
   } else if (!input.empty() && input[0] == '@') {
     // @username message
-    // send current message to a particular user
+    // send current message to a particular user, and make that user receipient
     size_t space_pos = input.find(' ');
 
     if (space_pos == string::npos) {
@@ -83,9 +83,10 @@ bool handle_kb_input(int client_fd, string &current_user,
     }
 
     string user_str = input.substr(1, space_pos - 1);
+    recipient_user = user_str;
     string text = input.substr(space_pos + 1);
     trim(text);
-    send_message(client_fd, "CHAT|" + user_str + "|" + text + "\n");
+    send_message(client_fd, "CHAT|" + recipient_user + "|" + text + "\n");
   } else {
     // normal chat message
     if (current_user.empty()) {
@@ -210,7 +211,7 @@ void show_help() {
   cout << "\nCommands:\n"
        << "  /list              list online users\n"
        << "  /chat <username>  set recipient for following messages\n"
-       << "  @<username> <msg> send one message to that user\n"
+       << "  @<username> <msg> set recipient for following messages and send message \n"
        << "  /quit             exit\n"
        << "  <msg>             send to current recipient (/chat first)\n\n";
 }
