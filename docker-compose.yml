@@ -1,0 +1,21 @@
+services:
+  server:
+    image: gcc:13
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: sh -c "make server && ./server"
+    ports:
+      - "8000:8000"
+
+  client:
+    image: gcc:13
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: sh -c "make client && ./client"
+    network_mode: "service:server"
+    depends_on:
+      - server
+    stdin_open: true
+    tty: true
