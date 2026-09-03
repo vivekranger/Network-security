@@ -1,7 +1,9 @@
 #include "constants.h"
+#include "crypto.h"
 #include "structs.h"
 #include "utils.h"
 #include <cstring>
+#include <fcntl.h>
 #include <iostream>
 #include <netinet/in.h>
 #include <string>
@@ -12,10 +14,19 @@
 
 using namespace std;
 
+int last_id = 0;
 char buffer[MAX_BUFFER_SIZE];
+BIGNUM *P;
+BIGNUM *G;
 
-void send_message(int fd, string message) {
-  send(fd, message.c_str(), message.size(), 0);
+void send_message(Client *c, string message, bool enc = 1) {
+  string msg;
+  if (enc && c->ready)
+    msg = encrypt(c->key, message);
+  else
+    msg = message;
+  msg.push_back('\n');
+  send(c->fd, msg.c_str(), msg.size(), 0);
 }
 
 bool check_username_available(unordered_set<Client *> &clients,
@@ -48,12 +59,14 @@ int create_server() {
   if (::bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) ==
       -1) {
     // TODO: free up socket connection
+    close(server_fd);
     return -1;
   }
 
   // Start listening
   if (listen(server_fd, 5) == -1) {
     // TODO: free up socket connection
+    close(server_fd);
     return -1;
   }
 
@@ -81,6 +94,36 @@ bool check_activity(int server_fd, fd_set *read_fds,
   return activity > 0;
 }
 
+bool handshake(Client *c, string &client_pub) {
+  BIGNUM *b = random_private(P);
+  BIGNUM *B = exp_mod(G, b, P);
+
+  if (client_pub.size() != KEY_SIZE * 2) // client_pub is in hex
+    return false;
+
+  BIGNUM *A = NULL;
+  if (BN_hex2bn(&A, client_pub.c_str()) != client_pub.size()) {
+    // some issue in hex string
+    BN_free(A);
+    return 0;
+  }
+  if (!valid_public(A, P)) {
+    BN_free(A);
+    return 0;
+  }
+
+  send_message(c, "HANDSHAKE|" + string(BN_bn2hex(B)), 0);
+
+  BIGNUM *s = exp_mod(A, b, P);
+  vuc secret = to_bytes(s);
+  c->key = derive_key(secret);
+  OPENSSL_cleanse(secret.data(), secret.size());
+  BN_free(b);
+  BN_free(B);
+  BN_free(A);
+  return true;
+}
+
 void handle_server_input(int server_fd, unordered_set<Client *> &clients) {
 
   int new_client = accept(server_fd, nullptr, nullptr);
@@ -88,10 +131,12 @@ void handle_server_input(int server_fd, unordered_set<Client *> &clients) {
   if (new_client != -1) {
 
     Client *c = new Client();
+    c->id = ++last_id;
     c->fd = new_client;
+    c->ready = false;
     clients.insert(c);
 
-    cout << "New client connected." << endl;
+    cout << "New client connected. Handshake not done yet..." << endl;
   }
 }
 
@@ -115,97 +160,122 @@ void handle_socket_input(fd_set *read_fds, unordered_set<Client *> &clients) {
     size_t newline_pos;
     while ((newline_pos = client->input_buffer.find('\n')) != string::npos) {
 
-      string message = client->input_buffer.substr(0, newline_pos);
-      trim(message);
+      string enc_message = client->input_buffer.substr(0, newline_pos);
       client->input_buffer.erase(0, newline_pos + 1);
 
-      if (message.substr(0, 9) == "REGISTER|") {
-
-        string username = message.substr(9);
-        trim(username);
-        if (!check_username_available(clients, username)) {
-          send_message(client->fd, "ERROR|Username unavailable\n");
-        } else {
-          client->username = username;
-          cout << "Registered: " << username << endl;
-          send_message(client->fd, "WELCOME|" + username + "\n");
-        }
-      } else if (message == "WHO") {
-        if (client->username.empty()) {
-          // ask user to register
-          send_message(client->fd, "ERROR|Not registered...\n");
-          continue;
+      if (!client->ready) {
+        // make it blocking for the handshake only
+        int flags = fcntl(client->fd, F_GETFL, 0);
+        fcntl(client->fd, F_SETFL, flags & ~O_NONBLOCK);
+        bool hs_valid = false;
+        if (enc_message.substr(0, 10) == "HANDSHAKE|") {
+          string s = enc_message.substr(10);
+          hs_valid = handshake(client, s);
         }
 
-        // list of online users, comma seperated
-        string response = "USERS|";
-        for (auto u : clients) {
-          if (u->username.empty())
-            continue;
-          response.append(u->username);
-          response.push_back(',');
-        }
-        // if any user added to list, at last an extra comma will be there
-        if (response.back() == ',')
-          response.pop_back();
-        response.append("\n");
-
-        send_message(client->fd, response);
-      } else if (message == "QUIT") {
-        dead_clients.insert(client);
-        break;
-      } else if (message.find("CHAT|", 0) == 0) {
-        if (client->username.empty()) {
-          // ask user to register
-          send_message(client->fd, "ERROR|Not registered...\n");
-          continue;
+        if (!hs_valid) {
+          cout << "Client " << client->id << " rejected (bad handshake)."
+               << endl;
+          dead_clients.insert(client);
+          break;
         }
 
-        size_t first_sep = message.find('|');
-        size_t second_sep = message.find('|', first_sep + 1);
-        if (second_sep == string::npos) {
-          continue;
-        }
+        fcntl(client->fd, F_SETFL, flags); // make it non-blocking again
+        client->ready = true;
 
-        string target =
-            message.substr(first_sep + 1, second_sep - first_sep - 1);
-        trim(target);
-        if (target.empty()) {
-          send_message(client->fd, "ERROR|Target username not specified...\n");
-          continue;
-        }
-        string text = message.substr(second_sep + 1);
-        trim(text);
+        cout << "Client " << client->id
+             << " connected, fingerprint = " << fingerprint(client->key)
+             << endl;
+      } else {
+        trim(enc_message);
+        string message = decrypt(client->key, enc_message);
 
-        cout << "Message from ->" << client->username << " -> to -> " << target
-             << " -> " << ": " << text << endl;
+        if (message.substr(0, 9) == "REGISTER|") {
 
-        if (client->username == target)
-          continue;
-
-        bool delivered = false;
-        for (auto u : clients) {
-          if (u->username == target) {
-            string outgoing_msg =
-                "FROM|" + client->username + "|" + text + "\n";
-            send_message(u->fd, outgoing_msg);
-            delivered = true;
-            break;
+          string username = message.substr(9);
+          trim(username);
+          if (!check_username_available(clients, username)) {
+            send_message(client, "ERROR|Username unavailable");
+          } else {
+            client->username = username;
+            cout << "Registered: " << username << endl;
+            send_message(client, "WELCOME|" + username);
           }
-        }
-        if (!delivered) {
-          send_message(client->fd, "ERROR|User not online\n");
+        } else if (message == "WHO") {
+          if (client->username.empty()) {
+            // ask user to register
+            send_message(client, "ERROR|Not registered...");
+            continue;
+          }
+
+          // list of online users, comma seperated
+          string response = "USERS|";
+          for (auto u : clients) {
+            if (u->username.empty())
+              continue;
+            response.append(u->username);
+            response.push_back(',');
+          }
+          // if any user added to list, at last an extra comma will be there
+          if (response.back() == ',')
+            response.pop_back();
+
+          send_message(client, response);
+        } else if (message == "QUIT") {
+          dead_clients.insert(client);
+          break;
+        } else if (message.find("CHAT|", 0) == 0) {
+          if (client->username.empty()) {
+            // ask user to register
+            send_message(client, "ERROR|Not registered...");
+            continue;
+          }
+
+          size_t first_sep = message.find('|');
+          size_t second_sep = message.find('|', first_sep + 1);
+          if (second_sep == string::npos) {
+            continue;
+          }
+
+          string target =
+              message.substr(first_sep + 1, second_sep - first_sep - 1);
+          trim(target);
+          if (target.empty()) {
+            send_message(client, "ERROR|Target username not specified...");
+            continue;
+          }
+          string text = message.substr(second_sep + 1);
+          trim(text);
+
+          cout << "Message from ->" << client->username << " -> to -> "
+               << target << " -> " << ": " << text << endl;
+
+          if (client->username == target)
+            continue;
+
+          bool delivered = false;
+          for (auto u : clients) {
+            if (u->username == target) {
+              string outgoing_msg = "FROM|" + client->username + "|" + text;
+              send_message(u, outgoing_msg);
+              delivered = true;
+              break;
+            }
+          }
+          if (!delivered) {
+            send_message(client, "ERROR|User not online");
+          }
         }
       }
     }
   }
 
   for (auto client : dead_clients) {
-    string username = client->username;
+    cout << "Client " << client->id << " disconnected." << endl;
+    OPENSSL_cleanse(client->key.data(), client->key.size());
     close(client->fd);
     clients.erase(client);
     delete client;
-    cout << username << " disconnected." << endl;
   }
 }
 
@@ -215,6 +285,11 @@ int main() {
   if (server_fd < 0) {
     return -1;
   }
+
+  P = BN_new();
+  BN_hex2bn(&P, P_HEX);
+  G = BN_new();
+  BN_set_word(G, 2);
 
   // mapping from username to client obj
   unordered_set<Client *> clients;
@@ -234,6 +309,8 @@ int main() {
     handle_socket_input(&read_fds, clients);
   }
 
+  BN_free(P);
+  BN_free(G);
   close(server_fd);
 
   return 0;

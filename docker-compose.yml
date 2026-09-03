@@ -4,18 +4,30 @@ services:
     working_dir: /app
     volumes:
       - .:/app
-    command: sh -c "make server && ./server"
+    command: sh -c "apt-get update && apt-get install -y libssl-dev && make server && ./server"
     ports:
       - "8000:8000"
+      - "3000:3000"   # wireshark web UI (shares this netns)
 
   client:
     image: gcc:13
     working_dir: /app
     volumes:
       - .:/app
-    command: sh -c "make client && ./client"
+    command: sh -c "apt-get update && apt-get install -y libssl-dev && make client && ./client"
     network_mode: "service:server"
     depends_on:
       - server
     stdin_open: true
     tty: true
+
+  wireshark:
+    image: ghcr.io/linuxserver/wireshark:latest   # lscr.io mirror serves HTTP, ghcr works
+    volumes:
+      - .:/config/captures
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    network_mode: "service:server"
+    depends_on:
+      - server
