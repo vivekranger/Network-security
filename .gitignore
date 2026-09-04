@@ -5,7 +5,6 @@
 *.o
 .vscode/
 .DS_Store
-phase*/
 
 certs/*.key
 certs/*.srl
