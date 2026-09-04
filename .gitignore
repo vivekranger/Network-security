@@ -1,0 +1,7 @@
+certs/*.crt
+certs/*.csr
+certs/*.key
+certs/*.srl
+
+.vscode
+.DS_store

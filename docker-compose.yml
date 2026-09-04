@@ -1,0 +1,75 @@
+networks:
+  lan:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.23.0.0/24
+
+services:
+  server:
+    image: gcc:13
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: sh -c "apt-get update && apt-get install -y libssl-dev && make server && ./server"
+    networks:
+      lan:
+        ipv4_address: 172.23.0.10
+    mac_address: "02:00:00:00:00:10"
+    ports:
+      - "8000:8000"
+
+  client:
+    image: gcc:13
+    working_dir: /app
+    volumes:
+      - .:/app
+    command: sh -c "apt-get update && apt-get install -y libssl-dev && make client && ./client"
+    networks:
+      lan:
+        ipv4_address: 172.23.0.20
+    mac_address: "02:00:00:00:00:20"
+    sysctls:
+      - net.ipv4.conf.all.arp_accept=1
+    stdin_open: true
+    tty: true
+    depends_on:
+      - server
+      - mallory
+
+  mallory:
+    image: gcc:13
+    working_dir: /app
+    volumes:
+      - .:/app
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.send_redirects=0
+    command: >
+      sh -c "apt-get update && apt-get install -y libssl-dev iptables &&
+             iptables -t nat -A PREROUTING -p tcp --dport 8000 -j REDIRECT --to-ports 8000 &&
+             make mallory arp_spoof &&
+             (./arp_spoof &) && ./mallory"
+    networks:
+      lan:
+        ipv4_address: 172.23.0.30
+    mac_address: "02:00:00:00:00:30"
+    depends_on:
+      - server
+
+  wireshark:
+    image: ghcr.io/linuxserver/wireshark:latest
+    volumes:
+      - .:/config/captures
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    ports:
+      - "3000:3000"
+    networks:
+      lan:
+        ipv4_address: 172.23.0.40
+    mac_address: "02:00:00:00:00:40"
