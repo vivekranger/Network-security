@@ -1,16 +1,13 @@
 #pragma once
 #include <iostream>
-#include <string>
 #include <vector>
-#include <cstdio>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
 #include <openssl/bn.h>
 #include <openssl/sha.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 using namespace std;
 
@@ -42,3 +39,11 @@ vuc derive_key(const vuc &secret);
 string fingerprint(const vuc &key);
 string encrypt(const vuc &key, const string &text);
 string decrypt(const vuc &key, const string &enc_msg);
+string b64enc(const string &raw);
+string b64dec(const string &b64);
+string read_file(const string &path);
+EVP_PKEY *load_privkey(const string &path);
+string sign_data(EVP_PKEY *key, const string &data);
+EVP_PKEY *verify_cert(const string &cert_pem, const string &ca_path,
+                      const string &expected_name);
+bool verify_sig(EVP_PKEY *pub, const string &data, const string &sig);

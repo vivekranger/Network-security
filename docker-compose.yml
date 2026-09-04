@@ -21,6 +21,14 @@ services:
     stdin_open: true
     tty: true
 
+  test:
+    image: gcc:13
+    working_dir: /app
+    volumes:
+      - .:/app
+    stdin_open: true
+    tty: true
+
   wireshark:
     image: ghcr.io/linuxserver/wireshark:latest   # lscr.io mirror serves HTTP, ghcr works
     volumes:

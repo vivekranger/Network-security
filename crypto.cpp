@@ -1,4 +1,5 @@
 #include "crypto.h"
+#include <fstream>
 #include <vector>
 
 BIGNUM *exp_mod(const BIGNUM *base, const BIGNUM *exp, const BIGNUM *m) {
@@ -131,4 +132,98 @@ string decrypt(const vuc &key, const string &enc_msg) {
     throw "Decryption failed...";
   string text(plain.begin(), plain.end());
   return text;
+}
+
+string b64enc(const string &raw) {
+  string out((raw.size() + 2) / 3 * 4 + 1, '\0');
+  int n = EVP_EncodeBlock((unsigned char *)out.data(),
+                          (const unsigned char *)raw.data(), raw.size());
+  out.resize(n < 0 ? 0 : n);
+  return out;
+}
+
+string b64dec(const string &b64) {
+  if (b64.size() % 4 || b64.empty())
+    return "";
+  string out(b64.size() / 4 * 3, '\0');
+  int n = EVP_DecodeBlock((unsigned char *)out.data(),
+                          (const unsigned char *)b64.data(), b64.size());
+  if (n < 0)
+    return "";
+  size_t pad = 0;
+  while (pad < 2 && b64[b64.size() - 1 - pad] == '=')
+    pad++;
+  out.resize(n - pad);
+  return out;
+}
+
+string read_file(const string &path) {
+  ifstream f(path, ios::binary);
+  return string(istreambuf_iterator<char>(f), istreambuf_iterator<char>());
+}
+
+EVP_PKEY *load_privkey(const string &path) {
+  FILE *f = fopen(path.c_str(), "r");
+  if (!f)
+    return NULL;
+  EVP_PKEY *k = PEM_read_PrivateKey(f, NULL, NULL, NULL);
+  fclose(f);
+  return k;
+}
+
+string sign_data(EVP_PKEY *key, const string &data) {
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  string sig;
+  size_t len = 0;
+  if (EVP_DigestSignInit(ctx, NULL, EVP_sha256(), NULL, key) == 1 &&
+      EVP_DigestSign(ctx, NULL, &len, (const unsigned char *)data.data(),
+                     data.size()) == 1) {
+    sig.resize(len);
+    if (EVP_DigestSign(ctx, (unsigned char *)sig.data(), &len,
+                       (const unsigned char *)data.data(), data.size()) == 1)
+      sig.resize(len);
+    else
+      sig.clear();
+  }
+  EVP_MD_CTX_free(ctx);
+  return sig;
+}
+
+EVP_PKEY *verify_cert(const string &cert_pem, const string &ca_path,
+                      const string &expected_name) {
+  BIO *b = BIO_new_mem_buf(cert_pem.data(), cert_pem.size());
+  X509 *leaf = PEM_read_bio_X509(b, NULL, NULL, NULL);
+  BIO_free(b);
+  if (!leaf)
+    return NULL;
+
+  EVP_PKEY *pub = NULL;
+  X509_STORE *store = X509_STORE_new();
+  X509_STORE_CTX *ctx = X509_STORE_CTX_new();
+
+  if (X509_STORE_load_locations(store, ca_path.c_str(), NULL) == 1 &&
+      X509_STORE_CTX_init(ctx, store, leaf, NULL) == 1) {
+    X509_VERIFY_PARAM *p = X509_STORE_CTX_get0_param(ctx);
+    X509_VERIFY_PARAM_set1_host(p, expected_name.c_str(), expected_name.size());
+    if (X509_verify_cert(ctx) == 1)
+      pub = X509_get_pubkey(leaf);
+    else
+      cerr << "cert verify failed: "
+           << X509_verify_cert_error_string(X509_STORE_CTX_get_error(ctx))
+           << endl;
+  }
+  X509_STORE_CTX_free(ctx);
+  X509_STORE_free(store);
+  X509_free(leaf);
+  return pub;
+}
+
+bool verify_sig(EVP_PKEY *pub, const string &data, const string &sig) {
+  EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+  bool ok =
+      EVP_DigestVerifyInit(ctx, NULL, EVP_sha256(), NULL, pub) == 1 &&
+      EVP_DigestVerify(ctx, (const unsigned char *)sig.data(), sig.size(),
+                       (const unsigned char *)data.data(), data.size()) == 1;
+  EVP_MD_CTX_free(ctx);
+  return ok;
 }

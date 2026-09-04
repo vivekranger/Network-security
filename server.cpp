@@ -18,11 +18,13 @@ int last_id = 0;
 char buffer[MAX_BUFFER_SIZE];
 BIGNUM *P;
 BIGNUM *G;
+EVP_PKEY *srv_key;
+string srv_cert_pem;
 
 void send_message(Client *c, string message, bool enc = 1) {
   string msg;
   if (enc && c->ready)
-    msg = encrypt(c->key, message);
+    msg = b64enc(encrypt(c->key, message));
   else
     msg = message;
   msg.push_back('\n');
@@ -112,7 +114,16 @@ bool handshake(Client *c, string &client_pub) {
     return 0;
   }
 
-  send_message(c, "HANDSHAKE|" + string(BN_bn2hex(B)), 0);
+  char *Bhex = BN_bn2hex(B);
+  string Bhex_str(Bhex);
+  OPENSSL_free(Bhex);
+  string sig = sign_data(srv_key, client_pub + "|" + Bhex_str);
+
+  // HANDSHAKE|DH_key(Gˆb)|srv_cert_pem|sig
+  send_message(c,
+               "HANDSHAKE|" + Bhex_str + "|" + b64enc(srv_cert_pem) + "|" +
+                   b64enc(sig),
+               0);
 
   BIGNUM *s = exp_mod(A, b, P);
   vuc secret = to_bytes(s);
@@ -187,8 +198,18 @@ void handle_socket_input(fd_set *read_fds, unordered_set<Client *> &clients) {
              << " connected, fingerprint = " << fingerprint(client->key)
              << endl;
       } else {
-        trim(enc_message);
-        string message = decrypt(client->key, enc_message);
+        string message;
+        try {
+          message = decrypt(client->key, b64dec(enc_message));
+        } catch (const char *err) {
+          cout << "decryption error: " << err << endl;
+          dead_clients.insert(client);
+          break;
+        } catch (...) {
+          cout << "unknown error while decryption." << endl;
+          dead_clients.insert(client);
+          break;
+        }
 
         if (message.substr(0, 9) == "REGISTER|") {
 
@@ -290,6 +311,13 @@ int main() {
   BN_hex2bn(&P, P_HEX);
   G = BN_new();
   BN_set_word(G, 2);
+
+  srv_key = load_privkey("certs/server.key");
+  srv_cert_pem = read_file("certs/server.crt");
+  if (!srv_key || srv_cert_pem.empty()) {
+    cerr << "missing server.key or server.crt" << endl;
+    return -1;
+  }
 
   // mapping from username to client obj
   unordered_set<Client *> clients;

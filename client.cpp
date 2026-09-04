@@ -22,6 +22,7 @@ struct ServerConn {
 BIGNUM *P;
 BIGNUM *G;
 BIGNUM *temp_a = 0;
+string Ahex;
 
 void show_help();
 void send_message(int client_fd, string message, bool enc = 1);
@@ -57,8 +58,11 @@ int connect_to_server() {
 bool handle_kb_input(int client_fd, string &current_user,
                      string &recipient_user) {
   string input;
-  getline(cin, input);
+  if (!getline(cin, input))
+    return 0;
   trim(input);
+  if (input.empty())
+    return 1;
 
   if (input == "/quit") {
     // /quit
@@ -139,7 +143,6 @@ bool handle_socket_input(int client_fd, string &current_user,
       bool hs_valid = false;
       if (enc_message.substr(0, 10) == "HANDSHAKE|") {
         string str = enc_message.substr(10);
-        trim(str);
         hs_valid = verify_handshake(str);
       }
 
@@ -152,13 +155,23 @@ bool handle_socket_input(int client_fd, string &current_user,
       continue;
     }
 
-    string message = decrypt(server.key, enc_message);
+    string message;
+    try {
+      message = decrypt(server.key, b64dec(enc_message));
+    } catch (const char *err) {
+      cout << "decryption error: " << err << endl;
+      return 0;
+    } catch (...) {
+      cout << "unknown error while decryption." << endl;
+      return 0;
+    }
+
     if (message.rfind("WELCOME|", 0) == 0) {
       cout << "Username registered." << endl;
     } else if (message.rfind("USERS|", 0) == 0) {
 
       string users = message.substr(6);
-      cout << "Online users: " << users;
+      cout << "Online users: " << users << endl;
     } else if (message.rfind("FROM|", 0) == 0) {
 
       size_t first_sep = message.find('|');
@@ -166,9 +179,9 @@ bool handle_socket_input(int client_fd, string &current_user,
       string sender = message.substr(first_sep + 1, second_sep - first_sep - 1);
       string text = message.substr(second_sep + 1);
 
-      cout << sender << ": " << text;
+      cout << sender << ": " << text << endl;
     } else if (message.rfind("ERROR|", 0) == 0) {
-      cout << "Error: " << message.substr(6);
+      cout << "Error: " << message.substr(6)<< endl;
     }
   }
 
@@ -188,7 +201,7 @@ string register_user(int client_fd) {
 void send_message(int client_fd, string message, bool enc) {
   string msg;
   if (enc)
-    msg = encrypt(server.key, message);
+    msg = b64enc(encrypt(server.key, message));
   else
     msg = message;
   msg.push_back('\n');
@@ -271,7 +284,7 @@ int main() {
 
 void show_help() {
   cout << "\nCommands:\n"
-       << "  /list              list online users\n"
+       << "  /who              list online users\n"
        << "  /chat <username>  set recipient for following messages\n"
        << "  @<username> <msg> set recipient for following messages and send "
           "message \n"
@@ -282,15 +295,40 @@ void show_help() {
 void init_handshake(int client_fd) {
   BIGNUM *a = random_private(P);
   BIGNUM *A = exp_mod(G, a, P);
+  char *Ah = BN_bn2hex(A);
+  Ahex = string(Ah);
+  OPENSSL_free(Ah);
 
   // client sends handshaking first;
-  string msg_str = "HANDSHAKE|" + string(BN_bn2hex(A));
-  send_message(client_fd, msg_str, 0);
+  send_message(client_fd, "HANDSHAKE|" + string(Ahex), 0);
   temp_a = a;
   BN_free(A);
 }
 
-bool verify_handshake(string &server_pub) {
+bool verify_handshake(string &server_payload) {
+  size_t p1 = server_payload.find('|');
+  if (p1 == string::npos)
+    return false;
+  size_t p2 = server_payload.find('|', p1 + 1);
+  if (p2 == string::npos)
+    return false;
+
+  string server_pub = server_payload.substr(0, p1);
+  string cert_pem = b64dec(server_payload.substr(p1 + 1, p2 - p1 - 1));
+  string sig = b64dec(server_payload.substr(p2 + 1));
+
+  EVP_PKEY *pub = verify_cert(cert_pem, "certs/ca.crt", "chat-server");
+  if (!pub) {
+    cout << "Server certificate not trusted." << endl;
+    return false;
+  }
+  bool sig_valid = verify_sig(pub, string(Ahex) + "|" + server_pub, sig);
+  EVP_PKEY_free(pub);
+  if (!sig_valid) {
+    cout << "Server signature invalid." << endl;
+    return false;
+  }
+
   if (server_pub.size() != KEY_SIZE * 2) // client_pub is in hex
     return false;
 
@@ -321,15 +359,17 @@ bool verify_handshake(string &server_pub) {
 
 bool validate_handshake(int client_fd) {
   fd_set read_fds;
-  while (true) {
+  while (!server.ready) {
     FD_ZERO(&read_fds);
     FD_SET(client_fd, &read_fds);
     int max_fd = client_fd;
     int activity = select(max_fd + 1, &read_fds, nullptr, nullptr, nullptr);
-    string s = "";
-    if (activity > 0)
-      return handle_socket_input(client_fd, s, s);
+    if (activity <= 0)
+      continue;
+    string s;
+    if (!handle_socket_input(client_fd, s, s))
+      return false;
   }
 
-  return 0;
+  return true;
 }
