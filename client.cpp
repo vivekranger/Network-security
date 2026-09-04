@@ -3,6 +3,7 @@
 #include "utils.h"
 #include <arpa/inet.h>
 #include <cstring>
+#include <ctime>
 #include <iostream>
 #include <map>
 #include <netinet/in.h>
@@ -30,12 +31,16 @@ string my_cert_pem;
 string my_name;
 struct Peer {
   vuc key;
+  vuc prevkey;
   bool ready = false;
   BIGNUM *eph = 0;
   string mypub;
   string pending;
+  time_t last_rekey = 0;
 };
 map<string, Peer> peers;
+
+const int REKEY_INTERVAL = 60;
 
 void show_help();
 void send_message(int client_fd, string message, bool enc = 1);
@@ -49,6 +54,7 @@ void send_chat(int client_fd, const string &peer, const string &text);
 void e2e_init(int client_fd, const string &peer);
 void e2e_recv(int client_fd, const string &sender, const string &type,
               const string &data);
+void check_rekey(int client_fd);
 
 int connect_to_server() {
   int client_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -268,8 +274,11 @@ bool check_activity(int client_fd, fd_set *read_fds) {
 
   int max_fd = client_fd;
 
-  // Wait for keyboard or server
-  int activity = select(max_fd + 1, read_fds, nullptr, nullptr, nullptr);
+  // Wait for keyboard or server, wake up every second to check rekey timer
+  timeval tv;
+  tv.tv_sec = 1;
+  tv.tv_usec = 0;
+  int activity = select(max_fd + 1, read_fds, nullptr, nullptr, &tv);
 
   return activity > 0;
 }
@@ -309,8 +318,13 @@ int main() {
   fd_set read_fds;
 
   while (true) {
+    bool active = check_activity(client_fd, &read_fds);
+
+    // rotate any stale keys before handling activity
+    check_rekey(client_fd);
+
     // No activity occured either in socket or client
-    if (!check_activity(client_fd, &read_fds))
+    if (!active)
       continue;
 
     // Check keyboard
@@ -441,6 +455,23 @@ void send_chat(int client_fd, const string &peer, const string &text) {
   }
 }
 
+string now_str() {
+  time_t t = time(0);
+  char buf[16];
+  strftime(buf, sizeof(buf), "%H:%M:%S", localtime(&t));
+  return string(buf);
+}
+
+void check_rekey(int client_fd) {
+  time_t now = time(0);
+  for (auto &it : peers) {
+    Peer &p = it.second;
+    // only rotate live sessions that are not already mid handshake
+    if (p.ready && p.eph == 0 && now - p.last_rekey >= REKEY_INTERVAL)
+      e2e_init(client_fd, it.first);
+  }
+}
+
 void e2e_init(int client_fd, const string &peer) {
   if (!my_key || my_cert_pem.empty()) {
     cout << "No certificate loaded for user `" << my_name << "`." << endl;
@@ -459,7 +490,7 @@ void e2e_init(int client_fd, const string &peer) {
     BN_free(p.eph);
   p.eph = a;
   p.mypub = Apub;
-  p.ready = false;
+  // keep p.ready/p.key as is so chat keeps working while we renegotiate
 
   string sig = sign_data(my_key, Apub);
   send_message(client_fd, "CHAT|" + peer + "|__E2E_INIT__" + Apub + "|" +
@@ -478,6 +509,15 @@ void e2e_recv(int client_fd, const string &sender, const string &type,
       string text = decrypt(p.key, b64dec(data));
       cout << sender << ": " << text << endl;
     } catch (...) {
+      // might be a message still encrypted with the key from before a rotation
+      if (!p.prevkey.empty()) {
+        try {
+          string text = decrypt(p.prevkey, b64dec(data));
+          cout << sender << ": " << text << endl;
+          return;
+        } catch (...) {
+        }
+      }
       cout << "E2E decryption failed from " << sender << endl;
     }
     return;
@@ -485,6 +525,10 @@ void e2e_recv(int client_fd, const string &sender, const string &type,
 
   if (type == "INIT") {
     if (!my_key || my_cert_pem.empty())
+      return;
+
+    // both sides fired a renegotiation at the same time.
+    if (peers[sender].eph != 0 && my_name < sender)
       return;
 
     size_t p1 = data.find('|');
@@ -541,11 +585,15 @@ void e2e_recv(int client_fd, const string &sender, const string &type,
       BN_free(p.eph);
       p.eph = 0;
     }
+    if (!p.prevkey.empty())
+      OPENSSL_cleanse(p.prevkey.data(), p.prevkey.size());
+    p.prevkey = p.key;
     p.key = derive_key(secret);
     p.ready = true;
+    p.last_rekey = time(0);
     OPENSSL_cleanse(secret.data(), secret.size());
 
-    cout << "E2E session with " << sender
+    cout << "[" << now_str() << "] E2E session with " << sender
          << " ready, fingerprint = " << fingerprint(p.key) << endl;
 
     BN_free(A);
@@ -598,13 +646,17 @@ void e2e_recv(int client_fd, const string &sender, const string &type,
 
     BIGNUM *secret_num = exp_mod(B, p.eph, P);
     vuc secret = to_bytes(secret_num);
+    if (!p.prevkey.empty())
+      OPENSSL_cleanse(p.prevkey.data(), p.prevkey.size());
+    p.prevkey = p.key;
     p.key = derive_key(secret);
     p.ready = true;
+    p.last_rekey = time(0);
     OPENSSL_cleanse(secret.data(), secret.size());
     BN_free(p.eph);
     p.eph = 0;
 
-    cout << "E2E session with " << sender
+    cout << "[" << now_str() << "] E2E session with " << sender
          << " ready, fingerprint = " << fingerprint(p.key) << endl;
 
     BN_free(B);
