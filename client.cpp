@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <cstring>
 #include <iostream>
+#include <map>
 #include <netinet/in.h>
 #include <string>
 #include <sys/select.h>
@@ -24,6 +25,18 @@ BIGNUM *G;
 BIGNUM *temp_a = 0;
 string Ahex;
 
+EVP_PKEY *my_key = 0;
+string my_cert_pem;
+string my_name;
+struct Peer {
+  vuc key;
+  bool ready = false;
+  BIGNUM *eph = 0;
+  string mypub;
+  string pending;
+};
+map<string, Peer> peers;
+
 void show_help();
 void send_message(int client_fd, string message, bool enc = 1);
 string register_user(int client_fd);
@@ -31,6 +44,11 @@ string register_user(int client_fd);
 void init_handshake(int client_fd);
 bool validate_handshake(int client_fd);
 bool verify_handshake(string &server_pub);
+// e2e
+void send_chat(int client_fd, const string &peer, const string &text);
+void e2e_init(int client_fd, const string &peer);
+void e2e_recv(int client_fd, const string &sender, const string &type,
+              const string &data);
 
 int connect_to_server() {
   int client_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -91,6 +109,26 @@ bool handle_kb_input(int client_fd, string &current_user,
     }
 
     cout << "Now chatting with `" << recipient_user << "`" << endl;
+  } else if (input.find("/e2e ", 0) == 0) {
+    // /e2e username
+    // start an end-to-end encrypted session with that user
+
+    if (current_user.empty()) {
+      cout << "Please register yourself first....\n";
+      current_user = register_user(client_fd);
+      return 1;
+    }
+
+    string peer = input.substr(5);
+    trim(peer);
+    if (peer.empty()) {
+      show_help();
+      return 1;
+    }
+
+    recipient_user = peer;
+    e2e_init(client_fd, peer);
+    cout << "Starting E2E session with `" << peer << "`" << endl;
   } else if (!input.empty() && input[0] == '@') {
     // @username message
     // send current message to a particular user, and make that user receipient
@@ -105,7 +143,7 @@ bool handle_kb_input(int client_fd, string &current_user,
     recipient_user = user_str;
     string text = input.substr(space_pos + 1);
     trim(text);
-    send_message(client_fd, "CHAT|" + recipient_user + "|" + text);
+    send_chat(client_fd, recipient_user, text);
   } else {
     // normal chat message
     if (current_user.empty()) {
@@ -114,7 +152,7 @@ bool handle_kb_input(int client_fd, string &current_user,
       return 1;
     }
 
-    send_message(client_fd, "CHAT|" + recipient_user + "|" + input);
+    send_chat(client_fd, recipient_user, input);
   }
 
   return 1;
@@ -179,7 +217,14 @@ bool handle_socket_input(int client_fd, string &current_user,
       string sender = message.substr(first_sep + 1, second_sep - first_sep - 1);
       string text = message.substr(second_sep + 1);
 
-      cout << sender << ": " << text << endl;
+      if (text.rfind("__E2E_INIT__", 0) == 0)
+        e2e_recv(client_fd, sender, "INIT", text.substr(12));
+      else if (text.rfind("__E2E_ACK__", 0) == 0)
+        e2e_recv(client_fd, sender, "ACK", text.substr(11));
+      else if (text.rfind("__E2E_MSG__", 0) == 0)
+        e2e_recv(client_fd, sender, "MSG", text.substr(11));
+      else
+        cout << sender << ": " << text << endl;
     } else if (message.rfind("ERROR|", 0) == 0) {
       cout << "Error: " << message.substr(6)<< endl;
     }
@@ -193,6 +238,10 @@ string register_user(int client_fd) {
 
   cout << "Enter username: ";
   getline(cin, username);
+
+  my_key = load_privkey("certs/" + username + ".key");
+  my_cert_pem = read_file("certs/" + username + ".crt");
+  my_name = username;
 
   send_message(client_fd, "REGISTER|" + username);
   return username;
@@ -286,6 +335,7 @@ void show_help() {
   cout << "\nCommands:\n"
        << "  /who              list online users\n"
        << "  /chat <username>  set recipient for following messages\n"
+       << "  /e2e <username>   start an end-to-end encrypted session\n"
        << "  @<username> <msg> set recipient for following messages and send "
           "message \n"
        << "  /quit             exit\n"
@@ -372,4 +422,193 @@ bool validate_handshake(int client_fd) {
   }
 
   return true;
+}
+
+void send_chat(int client_fd, const string &peer, const string &text) {
+  if (peer.empty()) {
+    cout << "No recipient selected..." << endl;
+    return;
+  }
+
+  Peer &p = peers[peer];
+  if (p.ready) {
+    send_message(client_fd,
+                 "CHAT|" + peer + "|__E2E_MSG__" + b64enc(encrypt(p.key, text)));
+  } else if (p.eph != 0) {
+    cout << "E2E session with `" << peer << "` not ready yet..." << endl;
+  } else {
+    send_message(client_fd, "CHAT|" + peer + "|" + text);
+  }
+}
+
+void e2e_init(int client_fd, const string &peer) {
+  if (!my_key || my_cert_pem.empty()) {
+    cout << "No certificate loaded for user `" << my_name << "`." << endl;
+    return;
+  }
+
+  BIGNUM *a = random_private(P);
+  BIGNUM *A = exp_mod(G, a, P);
+  char *Ah = BN_bn2hex(A);
+  string Apub(Ah);
+  OPENSSL_free(Ah);
+  BN_free(A);
+
+  Peer &p = peers[peer];
+  if (p.eph)
+    BN_free(p.eph);
+  p.eph = a;
+  p.mypub = Apub;
+  p.ready = false;
+
+  string sig = sign_data(my_key, Apub);
+  send_message(client_fd, "CHAT|" + peer + "|__E2E_INIT__" + Apub + "|" +
+                              b64enc(my_cert_pem) + "|" + b64enc(sig));
+}
+
+void e2e_recv(int client_fd, const string &sender, const string &type,
+              const string &data) {
+  if (type == "MSG") {
+    Peer &p = peers[sender];
+    if (!p.ready) {
+      cout << "E2E message from " << sender << " but no session." << endl;
+      return;
+    }
+    try {
+      string text = decrypt(p.key, b64dec(data));
+      cout << sender << ": " << text << endl;
+    } catch (...) {
+      cout << "E2E decryption failed from " << sender << endl;
+    }
+    return;
+  }
+
+  if (type == "INIT") {
+    if (!my_key || my_cert_pem.empty())
+      return;
+
+    size_t p1 = data.find('|');
+    if (p1 == string::npos)
+      return;
+    size_t p2 = data.find('|', p1 + 1);
+    if (p2 == string::npos)
+      return;
+
+    string Apub = data.substr(0, p1);
+    string cert_pem = b64dec(data.substr(p1 + 1, p2 - p1 - 1));
+    string sig = b64dec(data.substr(p2 + 1));
+
+    EVP_PKEY *pub = verify_cert(cert_pem, "certs/ca.crt", sender);
+    if (!pub) {
+      cout << "Peer certificate not trusted." << endl;
+      return;
+    }
+    bool sig_valid = verify_sig(pub, Apub, sig);
+    EVP_PKEY_free(pub);
+    if (!sig_valid) {
+      cout << "Peer signature invalid." << endl;
+      return;
+    }
+
+    if (Apub.size() != KEY_SIZE * 2)
+      return;
+
+    BIGNUM *A = NULL;
+    if (BN_hex2bn(&A, Apub.c_str()) != Apub.size()) {
+      BN_free(A);
+      return;
+    }
+    if (!valid_public(A, P)) {
+      BN_free(A);
+      return;
+    }
+
+    BIGNUM *b = random_private(P);
+    BIGNUM *B = exp_mod(G, b, P);
+    char *Bh = BN_bn2hex(B);
+    string Bpub(Bh);
+    OPENSSL_free(Bh);
+
+    string sig2 = sign_data(my_key, Apub + "|" + Bpub);
+    send_message(client_fd, "CHAT|" + sender + "|__E2E_ACK__" + Bpub + "|" +
+                                b64enc(my_cert_pem) + "|" + b64enc(sig2));
+
+    BIGNUM *secret_num = exp_mod(A, b, P);
+    vuc secret = to_bytes(secret_num);
+
+    Peer &p = peers[sender];
+    if (p.eph) {
+      BN_free(p.eph);
+      p.eph = 0;
+    }
+    p.key = derive_key(secret);
+    p.ready = true;
+    OPENSSL_cleanse(secret.data(), secret.size());
+
+    cout << "E2E session with " << sender
+         << " ready, fingerprint = " << fingerprint(p.key) << endl;
+
+    BN_free(A);
+    BN_free(B);
+    BN_free(b);
+    BN_free(secret_num);
+    return;
+  }
+
+  if (type == "ACK") {
+    Peer &p = peers[sender];
+    if (p.eph == 0)
+      return;
+
+    size_t p1 = data.find('|');
+    if (p1 == string::npos)
+      return;
+    size_t p2 = data.find('|', p1 + 1);
+    if (p2 == string::npos)
+      return;
+
+    string Bpub = data.substr(0, p1);
+    string cert_pem = b64dec(data.substr(p1 + 1, p2 - p1 - 1));
+    string sig = b64dec(data.substr(p2 + 1));
+
+    EVP_PKEY *pub = verify_cert(cert_pem, "certs/ca.crt", sender);
+    if (!pub) {
+      cout << "Peer certificate not trusted." << endl;
+      return;
+    }
+    bool sig_valid = verify_sig(pub, p.mypub + "|" + Bpub, sig);
+    EVP_PKEY_free(pub);
+    if (!sig_valid) {
+      cout << "Peer signature invalid." << endl;
+      return;
+    }
+
+    if (Bpub.size() != KEY_SIZE * 2)
+      return;
+
+    BIGNUM *B = NULL;
+    if (BN_hex2bn(&B, Bpub.c_str()) != Bpub.size()) {
+      BN_free(B);
+      return;
+    }
+    if (!valid_public(B, P)) {
+      BN_free(B);
+      return;
+    }
+
+    BIGNUM *secret_num = exp_mod(B, p.eph, P);
+    vuc secret = to_bytes(secret_num);
+    p.key = derive_key(secret);
+    p.ready = true;
+    OPENSSL_cleanse(secret.data(), secret.size());
+    BN_free(p.eph);
+    p.eph = 0;
+
+    cout << "E2E session with " << sender
+         << " ready, fingerprint = " << fingerprint(p.key) << endl;
+
+    BN_free(B);
+    BN_free(secret_num);
+    return;
+  }
 }

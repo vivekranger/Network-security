@@ -10,8 +10,17 @@ mallory: mallory.cpp utils.cpp crypto.cpp
 arp_spoof: arp_spoof.cpp
 	g++ -o $@ $^
 
-.PHONY: all certs
+.PHONY: all certs usercert
+
 certs: certs/server.crt
+
+usercert:
+	openssl req -newkey rsa:2048 -nodes \
+	  -keyout certs/$(U).key -out certs/$(U).csr -subj "/CN=$(U)"
+	openssl x509 -req -in certs/$(U).csr -CA certs/ca.crt -CAkey certs/ca.key \
+	  -CAcreateserial -days 365 -out certs/$(U).crt \
+	  -extfile <(printf "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nsubjectAltName=DNS:$(U)")
+	openssl verify -CAfile certs/ca.crt certs/$(U).crt
 
 certs/server.crt: certs/server.ext
 	mkdir -p certs
