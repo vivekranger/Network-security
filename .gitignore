@@ -1,5 +1,7 @@
 /client
 /server
+/mallory
+/arp_spoof
 *.o
 .vscode/
 .DS_Store

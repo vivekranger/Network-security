@@ -4,6 +4,12 @@ client: client.cpp utils.cpp crypto.cpp
 server: server.cpp utils.cpp crypto.cpp
 	g++ -o $@ $^ -lssl -lcrypto
 
+# seperate from all
+mallory: mallory.cpp utils.cpp crypto.cpp
+	g++ -o $@ $^ -lssl -lcrypto
+arp_spoof: arp_spoof.cpp
+	g++ -o $@ $^
+
 .PHONY: all certs
 certs: certs/server.crt
 

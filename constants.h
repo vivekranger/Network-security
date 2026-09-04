@@ -1,3 +1,3 @@
-#define SERVER_HOST "127.0.0.1"
+#define SERVER_HOST "172.23.0.10"
 #define SERVER_PORT 8000
 #define MAX_BUFFER_SIZE 1024
