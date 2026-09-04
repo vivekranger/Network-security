@@ -35,30 +35,45 @@ services:
     tty: true
     depends_on:
       - server
-      - mallory
+      # - mallory
 
-  mallory:
+  client2:
     image: gcc:13
     working_dir: /app
     volumes:
       - .:/app
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    sysctls:
-      - net.ipv4.ip_forward=1
-      - net.ipv4.conf.all.send_redirects=0
-    command: >
-      sh -c "apt-get update && apt-get install -y libssl-dev iptables &&
-             iptables -t nat -A PREROUTING -p tcp --dport 8000 -j REDIRECT --to-ports 8000 &&
-             make mallory arp_spoof &&
-             (./arp_spoof &) && ./mallory"
+    command: sh -c "apt-get update && apt-get install -y libssl-dev && make client && ./client"
     networks:
       lan:
-        ipv4_address: 172.23.0.30
-    mac_address: "02:00:00:00:00:30"
+        ipv4_address: 172.23.0.21
+    mac_address: "02:00:00:00:00:21"
+    stdin_open: true
+    tty: true
     depends_on:
       - server
+
+  # mallory:
+  #   image: gcc:13
+  #   working_dir: /app
+  #   volumes:
+  #     - .:/app
+  #   cap_add:
+  #     - NET_ADMIN
+  #     - NET_RAW
+  #   sysctls:
+  #     - net.ipv4.ip_forward=1
+  #     - net.ipv4.conf.all.send_redirects=0
+  #   command: >
+  #     sh -c "apt-get update && apt-get install -y libssl-dev iptables &&
+  #            iptables -t nat -A PREROUTING -p tcp --dport 8000 -j REDIRECT --to-ports 8000 &&
+  #            make mallory arp_spoof &&
+  #            (./arp_spoof &) && ./mallory"
+  #   networks:
+  #     lan:
+  #       ipv4_address: 172.23.0.30
+  #   mac_address: "02:00:00:00:00:30"
+  #   depends_on:
+  #     - server
 
   wireshark:
     image: ghcr.io/linuxserver/wireshark:latest
