@@ -1,3 +1,51 @@
+## Running Code
+
+just run the make, `Makefile` already included in folder, so it'll create two binaries `client` and `server`. Then execute them directly, either in docker (docker compose included)
+
+To run make:
+
+```
+make && ./server && ./client
+```
+
+> change server IP in constants.h according to your machine.
+
+Then for running MITM `mallory`, you also need to do arp spoofing. 
+
+for arp spoofing, make sure you have `libssl-dev`  and `iptables` packages installed.
+
+
+First run the following for updating IP tables
+
+```
+iptables -t nat -A PREROUTING -p tcp --dport 8000 -j REDIRECT --to-ports 8000
+```
+
+> Make sure to update IP and Mac addresses for server and client in arp_spoof.cpp file, at line 17.
+
+Now, run the following, and execute the output binaries for arp_spoof:
+
+```
+make arp_spoof && ./arp_spoof
+```
+
+Then, run the mallory, and execute the output binaries for mallory:
+
+```
+make mallory && ./mallory
+```
+
+then run the usual server and after server starts, run the client.
+
+```
+make && ./server && ./client
+```
+
+> if you want to run this on docker, docker-compose.yml file is provided.
+> just copy it in current folder, and run.
+> use `client` and `client2` for 2 different clients, because ip is hardcoded, so running
+> again same container will throw address used error.
+
 ## End-to-end encrypted mode
 
 two clients set up their own shared key, and the server only

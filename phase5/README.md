@@ -10,7 +10,9 @@ session is alive.
 - If both sides rotate at the same time, the one with the smaller username keeps
   its handshake and the other answers it, so both end up on the same key.
 
-## Sample run
+## Running Code
+
+> Same instructions from phase 4.
 
 ### Client 1
 
